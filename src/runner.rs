@@ -41,6 +41,8 @@ use specs::{
 use std::rc::Rc;
 use validation::{DEFAULT_MEMORY_INDEX, DEFAULT_TABLE_INDEX};
 
+use std::cell::RefMut;
+
 /// Maximum number of bytes on the value stack.
 /// wasmi's default value is 1024 * 1024,
 /// ZKWASM: Maximum number of entries on the value stack.
@@ -269,6 +271,27 @@ impl Interpreter {
         Ok(opt_return_value)
     }
 
+    pub fn start_execution_with_callback<'a, E: Externals + 'a>(
+        &mut self,
+        externals: &'a mut E,
+        callback: impl FnMut(RefMut<'_, Tracer>)
+    ) -> Result<Option<RuntimeValue>, Trap> {
+        // Ensure that the VM has not been executed. This is checked in `FuncInvocation::start_execution`.
+        assert!(self.state == InterpreterState::Initialized);
+
+        self.state = InterpreterState::Started;
+        self.run_interpreter_loop_with_callback(externals,callback)?;
+
+        let opt_return_value = self
+            .return_type
+            .map(|vt| self.value_stack.pop().with_type(vt));
+
+        // Ensure that stack is empty after the execution. This is guaranteed by the validation properties.
+        assert!(self.value_stack.len() == 0);
+
+        Ok(opt_return_value)
+    }
+
     pub fn resume_execution<'a, E: Externals + 'a>(
         &mut self,
         return_val: Option<RuntimeValue>,
@@ -465,6 +488,191 @@ impl Interpreter {
                     }
                 }
             }
+
+            //inject a output function
+
+        }
+    }
+
+
+    fn run_interpreter_loop_with_callback<'a, E: Externals + 'a>(
+        &mut self,
+        externals: &'a mut E,
+        mut callback: impl FnMut(RefMut<'_, Tracer>)
+    ) -> Result<(), Trap> {
+        let mut cycles = 0;
+        loop {
+            let mut function_context = self.call_stack.pop().expect(
+                "on loop entry - not empty; on loop continue - checking for emptiness; qed",
+            );
+            let function_ref = function_context.function.clone();
+            let function_body = function_ref
+				.body()
+				.expect(
+					"Host functions checked in function_return below; Internal functions always have a body; qed"
+				);
+
+            if !function_context.is_initialized() {
+                // Initialize stack frame for the function call.
+                function_context.initialize(&function_body.locals, &mut self.value_stack)?;
+            }
+
+            let function_return = self
+                .do_run_function(&mut function_context, &function_body.code)
+                .map_err(Trap::from)?;
+
+            match function_return {
+                RunResult::Return => {
+                    if self.call_stack.is_empty() {
+                        // This was the last frame in the call stack. This means we
+                        // are done executing.
+                        println!("total instructions===============> {:?}", cycles);
+                        return Ok(());
+                    }
+                }
+                RunResult::NestedCall(nested_func) => {
+                    if self.call_stack.is_full() {
+                        return Err(TrapCode::StackOverflow.into());
+                    }
+
+                    match *nested_func.as_internal() {
+                        FuncInstanceInternal::Internal { .. } => {
+                            let nested_context = FunctionContext::new(nested_func.clone());
+
+                            if let Some(tracer) = self.get_tracer_if_active() {
+                                let mut tracer = tracer.borrow_mut();
+                                let callee_fid = tracer.lookup_function(&nested_func);
+
+                                let eid = tracer.eid();
+                                let last_jump_eid = tracer.last_jump_eid();
+
+                                let inst = tracer.lookup_ientry(
+                                    &function_context.function,
+                                    function_context.position,
+                                );
+
+                                tracer.jtable.push(JumpTableEntry {
+                                    eid,
+                                    last_jump_eid,
+                                    callee_fid,
+                                    inst: Box::new(inst.into()),
+                                });
+
+                                tracer.push_frame();
+                            }
+
+                            if let Some(tracer) = self.tracer.clone() {
+                                if tracer
+                                    .borrow()
+                                    .is_phantom_function(&nested_context.function)
+                                {
+                                    self.mask_tracer.push(self.value_stack.sp as u32);
+                                }
+                            }
+
+                            self.call_stack.push(function_context);
+                            self.call_stack.push(nested_context);
+                        }
+                        FuncInstanceInternal::Host { ref signature, .. } => {
+                            prepare_function_args(
+                                signature,
+                                &mut self.value_stack,
+                                &mut self.scratch,
+                            );
+                            // We push the function context first. If the VM is not resumable, it does no harm. If it is, we then save the context here.
+                            self.call_stack.push(function_context);
+
+                            let return_val = match FuncInstance::invoke(
+                                &nested_func,
+                                &self.scratch,
+                                externals,
+                            ) {
+                                Ok(val) => val,
+                                Err(trap) => {
+                                    if trap.is_host() {
+                                        self.state = InterpreterState::Resumable(
+                                            nested_func.signature().return_type(),
+                                        );
+                                    }
+                                    return Err(trap);
+                                }
+                            };
+
+                            // Check if `return_val` matches the signature.
+                            let value_ty = return_val.as_ref().map(|val| val.value_type());
+                            let expected_ty = nested_func.signature().return_type();
+                            if value_ty != expected_ty {
+                                return Err(TrapCode::UnexpectedSignature.into());
+                            }
+
+                            if let Some(return_val) = return_val {
+                                self.value_stack
+                                    .push(return_val.into())
+                                    .map_err(Trap::from)?;
+                            }
+
+                            if let Some(return_val) = return_val {
+                                if let Some(tracer) = self.get_tracer_if_active() {
+                                    let mut tracer = (*tracer).borrow_mut();
+
+                                    let entry = tracer.etable.get_last_entry_mut().unwrap();
+
+                                    match &entry.step_info {
+                                        StepInfo::CallHost {
+                                            plugin,
+                                            host_function_idx,
+                                            function_name,
+                                            args,
+                                            ret_val,
+                                            signature,
+                                            op_index_in_plugin,
+                                        } => {
+                                            assert!(ret_val.is_none());
+                                            entry.step_info = StepInfo::CallHost {
+                                                plugin: *plugin,
+                                                host_function_idx: *host_function_idx,
+                                                function_name: function_name.clone(),
+                                                args: args.clone(),
+                                                ret_val: Some(from_value_internal_to_u64_with_typ(
+                                                    signature.return_type.unwrap().into(),
+                                                    return_val.into(),
+                                                )),
+                                                signature: signature.clone(),
+                                                op_index_in_plugin: *op_index_in_plugin,
+                                            }
+                                        }
+                                        StepInfo::ExternalHostCall { op, sig, .. } => {
+                                            if let ExternalHostCallSignature::Return = sig {
+                                                entry.step_info = StepInfo::ExternalHostCall {
+                                                    op: *op,
+                                                    value: Some(
+                                                        from_value_internal_to_u64_with_typ(
+                                                            VarType::I64,
+                                                            return_val.into(),
+                                                        ),
+                                                    ),
+                                                    sig: *sig,
+                                                }
+                                            }
+                                        }
+                                        _ => unreachable!(),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            //inject a output function every 2000 cycles
+            if let Some(tracer) = self.get_tracer_if_active() {
+                let tracer = tracer.borrow_mut();
+                let eid = tracer.etable.get_latest_eid();
+                cycles += eid;
+                if eid > 1000000 {
+                    println!("wasm eid={}, start dumping trace for segment: {}",eid, eid/2000);
+                    callback(tracer );
+                }
+            };
         }
     }
 

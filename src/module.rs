@@ -33,6 +33,9 @@ use parity_wasm::elements::{External, InitExpr, Instruction, Internal, Resizable
 use specs::configure_table::ConfigureTable;
 use validation::{DEFAULT_MEMORY_INDEX, DEFAULT_TABLE_INDEX};
 
+
+use std::cell::RefMut;
+
 /// Reference to a [`ModuleInstance`].
 ///
 /// This reference has a reference-counting semantics.
@@ -723,6 +726,25 @@ impl ModuleInstance {
         }
 
         FuncInstance::invoke_trace(&func_instance, args, externals, tracer).map_err(Error::Trap)
+    }
+
+    pub fn invoke_export_trace_with_callback<E: Externals>(
+        &self,
+        func_name: &str,
+        args: &[RuntimeValue],
+        externals: &mut E,
+        tracer: Rc<RefCell<Tracer>>,
+        callback: impl FnMut(RefMut<'_, Tracer>)
+    ) -> Result<Option<RuntimeValue>, Error> {
+        let func_instance = self.func_by_name(func_name)?;
+
+        {
+            let mut tracer = tracer.borrow_mut();
+
+            tracer.last_jump_eid.push(0);
+        }
+
+        FuncInstance::invoke_trace_with_callback(&func_instance, args, externals, tracer, callback).map_err(Error::Trap)
     }
 
     /// Invoke exported function by a name using recycled stacks.

@@ -17,6 +17,8 @@ use alloc::{
 use core::{cell::RefCell, fmt};
 use parity_wasm::elements::Local;
 
+use std::cell::RefMut;
+
 /// Reference to a function (See [`FuncInstance`] for details).
 ///
 /// This reference has a reference-counting semantics.
@@ -200,6 +202,24 @@ impl FuncInstance {
                 let mut interpreter = Interpreter::new(func, args, None)?;
                 interpreter.tracer = Some(tracer);
                 interpreter.start_execution(externals)
+            }
+            FuncInstanceInternal::Host { .. } => unreachable!(),
+        }
+    }
+
+    pub fn invoke_trace_with_callback<E: Externals>(
+        func: &FuncRef,
+        args: &[RuntimeValue],
+        externals: &mut E,
+        tracer: Rc<RefCell<Tracer>>,
+        callback: impl FnMut(RefMut<'_, Tracer>)
+    ) -> Result<Option<RuntimeValue>, Trap> {
+        check_function_args(func.signature(), args)?;
+        match *func.as_internal() {
+            FuncInstanceInternal::Internal { .. } => {
+                let mut interpreter = Interpreter::new(func, args, None)?;
+                interpreter.tracer = Some(tracer);
+                interpreter.start_execution_with_callback(externals, callback)
             }
             FuncInstanceInternal::Host { .. } => unreachable!(),
         }
