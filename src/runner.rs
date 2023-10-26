@@ -38,7 +38,7 @@ use specs::{
     mtable::{MemoryReadSize, MemoryStoreSize, VarType},
     step::StepInfo,
 };
-use std::rc::Rc;
+use std::{process, rc::Rc};
 use validation::{DEFAULT_MEMORY_INDEX, DEFAULT_TABLE_INDEX};
 
 use std::cell::RefMut;
@@ -274,13 +274,13 @@ impl Interpreter {
     pub fn start_execution_with_callback<'a, E: Externals + 'a>(
         &mut self,
         externals: &'a mut E,
-        callback: impl FnMut(RefMut<'_, Tracer>)
+        callback: impl FnMut(RefMut<'_, Tracer>),
     ) -> Result<Option<RuntimeValue>, Trap> {
         // Ensure that the VM has not been executed. This is checked in `FuncInvocation::start_execution`.
         assert!(self.state == InterpreterState::Initialized);
 
         self.state = InterpreterState::Started;
-        self.run_interpreter_loop_with_callback(externals,callback)?;
+        self.run_interpreter_loop_with_callback(externals, callback)?;
 
         let opt_return_value = self
             .return_type
@@ -490,17 +490,15 @@ impl Interpreter {
             }
 
             //inject a output function
-
         }
     }
-
 
     fn run_interpreter_loop_with_callback<'a, E: Externals + 'a>(
         &mut self,
         externals: &'a mut E,
-        mut callback: impl FnMut(RefMut<'_, Tracer>)
+        mut callback: impl FnMut(RefMut<'_, Tracer>),
     ) -> Result<(), Trap> {
-        let mut cycles = 0;
+        let mut cycles: u64 = 0;
         loop {
             let mut function_context = self.call_stack.pop().expect(
                 "on loop entry - not empty; on loop continue - checking for emptiness; qed",
@@ -527,6 +525,7 @@ impl Interpreter {
                         // This was the last frame in the call stack. This means we
                         // are done executing.
                         println!("total instructions===============> {:?}", cycles);
+                        std::process::exit(0);
                         return Ok(());
                     }
                 }
@@ -667,9 +666,14 @@ impl Interpreter {
             if let Some(tracer) = self.get_tracer_if_active() {
                 let tracer = tracer.borrow_mut();
                 let eid = tracer.etable.get_latest_eid();
-                cycles += eid;
                 if eid > 1000000 {
-                    println!("wasm eid={}, start dumping trace for segment: {}",eid, eid/2000);
+                    cycles += eid as u64;
+                    println!(
+                        "wasm eid={}, cycles={}, start dumping trace for segment: {}",
+                        eid,
+                        cycles,
+                        eid / 2000
+                    );
                     callback(tracer);
                 }
             };
@@ -2200,6 +2204,7 @@ impl Interpreter {
         instructions: &isa::Instructions,
     ) -> Result<RunResult, TrapCode> {
         let mut iter = instructions.iterate_from(function_context.position);
+        let mut fid: Option<u32> = None;
         loop {
             let pc = iter.position();
             let sp = self.value_stack.sp;
@@ -2230,12 +2235,14 @@ impl Interpreter {
 
                         let instruction = { instruction.into(&tracer.function_index_translation) };
 
-                        let function = tracer.lookup_function(&function_context.function);
+                        if fid.is_none() {
+                            fid = Some(tracer.lookup_function(&function_context.function));
+                        }
 
                         let last_jump_eid = tracer.last_jump_eid();
 
                         let inst_entry = InstructionTableEntry {
-                            fid: function,
+                            fid: fid.unwrap(),
                             iid: pc,
                             opcode: instruction,
                         };
