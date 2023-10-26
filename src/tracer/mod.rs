@@ -56,6 +56,7 @@ pub struct Tracer {
     pub wasm_input_func_ref: Option<FuncRef>,
     pub itable_entries: HashMap<u64, InstructionTableEntry>,
     pub function_map: HashMap<usize, u32>,
+    pub host_function_map: HashMap<usize, u32>,
 }
 
 impl Tracer {
@@ -84,6 +85,7 @@ impl Tracer {
             wasm_input_func_idx: None,
             itable_entries: HashMap::new(),
             function_map: HashMap::new(),
+            host_function_map: HashMap::new(),
         }
     }
 
@@ -264,7 +266,9 @@ impl Tracer {
                         FuncInstanceInternal::Internal { image_func_index, .. } => {
                             self.function_map.insert(image_func_index, func_index_in_itable);
                         },
-                        FuncInstanceInternal::Host { .. } => {},
+                        FuncInstanceInternal::Host { host_func_index, .. } => {
+                            self.host_function_map.insert(host_func_index, func_index_in_itable);
+                        },
                     }
 
                     self.function_index_translation.insert(
@@ -341,12 +345,14 @@ impl Tracer {
     }
 
     pub fn lookup_function(&self, function: &FuncRef) -> u32 {
-        let pos = self
-            .function_lookup
-            .iter()
-            .position(|m| m.0 == *function)
-            .unwrap();
-        self.function_lookup.get(pos).unwrap().1
+        match *function.as_internal() {
+            FuncInstanceInternal::Internal { image_func_index, .. } => {
+                *self.function_map.get(&image_func_index).unwrap()
+            },
+            FuncInstanceInternal::Host { host_func_index, .. } => {
+                *self.host_function_map.get(&host_func_index).unwrap()
+            },
+        }
     }
 
     pub fn lookup_ientry(&self, function: &FuncRef, pos: u32) -> InstructionTableEntry {
