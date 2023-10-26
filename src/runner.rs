@@ -670,7 +670,7 @@ impl Interpreter {
                 cycles += eid;
                 if eid > 1000000 {
                     println!("wasm eid={}, start dumping trace for segment: {}",eid, eid/2000);
-                    callback(tracer );
+                    callback(tracer);
                 }
             };
         }

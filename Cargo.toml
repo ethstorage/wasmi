@@ -60,3 +60,6 @@ harness = false
 [profile.bench]
 lto = "fat"
 codegen-units = 1
+
+[profile.release]
+debug = true
