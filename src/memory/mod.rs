@@ -63,10 +63,10 @@ impl ::core::ops::Deref for MemoryRef {
 pub struct MemoryInstance {
     /// Memory limits.
     limits: ResizableLimits,
+    current_size: Cell<usize>,
     /// Linear memory buffer with lazy allocation.
     buffer: RefCell<ByteBuf>,
     initial: Pages,
-    current_size: Cell<usize>,
     maximum: Option<Pages>,
 }
 
@@ -192,8 +192,10 @@ impl MemoryInstance {
     ///     Bytes(65536),
     /// );
     /// ```
+    #[inline]
     pub fn current_size(&self) -> Pages {
-        Bytes(self.buffer.borrow().len()).round_up_to()
+        // Bytes(self.buffer.borrow().len()).round_up_to()
+        Bytes(self.current_size.get()).round_up_to()
     }
 
     /// Get value from memory at given offset.
@@ -286,7 +288,7 @@ impl MemoryInstance {
             .realloc(new_buffer_length.0)
             .map_err(Error::Memory)?;
 
-        self.current_size.set(new_buffer_length.0);
+        Cell::set(&self.current_size, new_buffer_length.0);
 
         Ok(size_before_grow)
     }
