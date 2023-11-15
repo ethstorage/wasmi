@@ -4,11 +4,11 @@ use specs::{
     brtable::{ElemEntry, ElemTable},
     configure_table::ConfigureTable,
     etable::EventTable,
-    host_function::HostFunctionDesc,
-    itable::{InstructionTable, InstructionTableEntry},
+    host_function::{HostFunctionDesc, HostPlugin},
+    itable::{InstructionTable, InstructionTableEntry, Opcode},
     jtable::{JumpTable, StaticFrameEntry},
     mtable::VarType,
-    types::FunctionType,
+    types::FunctionType, state::InitializationState, imtable::InitMemoryTable, step::StepInfo,
 };
 
 use crate::{
@@ -35,6 +35,29 @@ pub struct FuncDesc {
 }
 
 #[derive(Debug)]
+pub struct TracerCompilationTable {
+    pub itable: InstructionTable,
+    pub imtable: InitMemoryTable,
+    pub etable: EventTable,
+    pub jtable: JumpTable,
+    pub elem_table: ElemTable,
+    pub configure_table: ConfigureTable,
+    pub static_jtable: Vec<StaticFrameEntry>,
+    // initial state related
+    pub next_imtable: InitMemoryTable,
+    pub prev_state: InitializationState<u32>,
+    pub next_state: InitializationState<u32>,
+}
+
+struct Callback(Box<dyn FnMut(TracerCompilationTable)>);
+use core::fmt::Debug;
+impl Debug for Callback {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub struct Tracer {
     pub itable: InstructionTable,
     pub imtable: IMTable,
@@ -54,6 +77,12 @@ pub struct Tracer {
     // Wasm Image Function Idx
     pub wasm_input_func_idx: Option<u32>,
     pub wasm_input_func_ref: Option<FuncRef>,
+    // continuation related
+    pub next_imtable: IMTable,
+    pub prev_state: InitializationState<u32>,
+    pub next_state: InitializationState<u32>,
+    prev_eid: u32,
+    callback: Callback,
 }
 
 impl Tracer {
@@ -61,6 +90,7 @@ impl Tracer {
     pub fn new(
         host_plugin_lookup: HashMap<usize, HostFunctionDesc>,
         phantom_functions: &Vec<String>,
+        callback: impl FnMut(TracerCompilationTable) + 'static,
     ) -> Self {
         Tracer {
             itable: InstructionTable::default(),
@@ -80,6 +110,12 @@ impl Tracer {
             phantom_functions_ref: vec![],
             wasm_input_func_ref: None,
             wasm_input_func_idx: None,
+            // continuation related
+            next_imtable: IMTable::default(),
+            prev_state: InitializationState::<u32>::default(),
+            next_state: InitializationState::<u32>::default(),
+            prev_eid: 0,
+            callback: Callback(Box::new(callback)),
         }
     }
 
@@ -99,6 +135,10 @@ impl Tracer {
         self.etable.get_latest_eid()
     }
 
+    pub fn prev_eid(&self) -> u32 {
+        self.prev_eid
+    }
+
     fn allocate_func_index(&mut self) -> u32 {
         let r = self.function_index_allocator;
         self.function_index_allocator = r + 1;
@@ -114,17 +154,145 @@ impl Tracer {
 }
 
 impl Tracer {
-    pub(crate) fn push_init_memory(&mut self, memref: MemoryRef) {
+    fn update_initialization_state(
+        &mut self,
+        is_last_slice: bool,
+    ) {
+        let mut host_public_inputs = self.prev_state.host_public_inputs;
+        let mut context_in_index = self.prev_state.context_in_index;
+        let mut context_out_index = self.prev_state.context_out_index;
+        let mut external_host_call_call_index =
+            self.prev_state.external_host_call_call_index;
+
+        #[cfg(feature = "continuation")]
+        let mut jops = self.prev_state.jops;
+
+        for entry in self.etable.entries() {
+            match &entry.step_info {
+                // TODO: fix hard code
+                StepInfo::CallHost {
+                    function_name,
+                    args,
+                    op_index_in_plugin,
+                    ..
+                } => {
+                    if *op_index_in_plugin == HostPlugin::HostInput as usize {
+                        if function_name == "wasm_input" && args[0] != 0
+                            || function_name == "wasm_output"
+                        {
+                            host_public_inputs += 1;
+                        }
+                    } else if *op_index_in_plugin == HostPlugin::Context as usize {
+                        if function_name == "wasm_read_context" {
+                            context_in_index += 1;
+                        } else if function_name == "wasm_write_context" {
+                            context_out_index += 1;
+                        }
+                    }
+                }
+                StepInfo::ExternalHostCall { .. } => external_host_call_call_index += 1,
+                StepInfo::Call { .. } | StepInfo::CallIndirect { .. } | StepInfo::Return { .. } => {
+                    #[cfg(feature = "continuation")]
+                    {
+                        jops += 1;
+                    }
+                }
+                _ => (),
+            }
+        }
+
+        let last_entry = self.etable.entries().last().unwrap();
+
+        let post_initialization_state = if is_last_slice {
+            InitializationState {
+                eid: last_entry.eid + 1,
+                fid: 0,
+                iid: 0,
+                frame_id: 0,
+                // TODO: why not constant 4095?
+                sp: last_entry.sp
+                    + if let Opcode::Return { drop, .. } = last_entry.inst.opcode {
+                        drop
+                    } else {
+                        0
+                    },
+
+                host_public_inputs,
+                context_in_index,
+                context_out_index,
+                external_host_call_call_index,
+
+                initial_memory_pages: last_entry.allocated_memory_pages,
+                maximal_memory_pages: self.configure_table.maximal_memory_pages,
+
+                #[cfg(feature = "continuation")]
+                jops,
+            }
+        } else {
+            InitializationState {
+                eid: last_entry.eid,
+                fid: last_entry.inst.fid,
+                iid: last_entry.inst.iid,
+                frame_id: last_entry.last_jump_eid,
+                // TODO: why not constant 4095?
+                sp: last_entry.sp,
+
+                host_public_inputs,
+                context_in_index,
+                context_out_index,
+                external_host_call_call_index,
+
+                initial_memory_pages: last_entry.allocated_memory_pages,
+                maximal_memory_pages: self.configure_table.maximal_memory_pages,
+
+                #[cfg(feature = "continuation")]
+                jops,
+            }
+        };
+
+        self.next_state = post_initialization_state;
+    }
+
+    pub(crate) fn invoke_callback(&mut self, is_last_slice: bool) {
+        // update next_state first
+        self.update_initialization_state(is_last_slice);
+        self.prev_eid = self.eid();
+        let etable =  std::mem::take(&mut self.etable);
+        self.etable.latest_eid = self.prev_eid;
+        let tables = TracerCompilationTable {
+            itable: self.itable.clone(),
+            imtable: self.imtable.finalized(),
+            etable,
+            jtable: self.jtable.clone(),
+            elem_table: self.elem_table.clone(),
+            configure_table:  self.configure_table.clone(),
+            static_jtable:  self.static_jtable_entries.clone(),
+            // initial state related
+            next_imtable: self.next_imtable.finalized(),
+            prev_state: self.prev_state.clone(),
+            next_state: self.next_state.clone()
+        };
+
+        // update prev state to current
+        _ = std::mem::replace(&mut self.imtable, self.next_imtable.clone());
+        _ = std::mem::replace(&mut self.prev_state, self.next_state.clone());
+
+        self.callback.0(tables)
+    }
+}
+
+impl Tracer {
+    fn push_init_memory_intable(table: &mut IMTable, memref: MemoryRef) {
         let pages = (*memref).limits().initial();
         // one page contains 64KB*1024/8=8192 u64 entries
         for i in 0..(pages * 8192) {
             let mut buf = [0u8; 8];
             (*memref).get_into(i * 8, &mut buf).unwrap();
-            self.imtable
+            table
                 .push(false, true, i, i, VarType::I64, u64::from_le_bytes(buf));
         }
 
-        self.imtable.push(
+        table.push(
             false,
             true,
             pages * 8192,
@@ -138,10 +306,19 @@ impl Tracer {
         );
     }
 
-    pub(crate) fn push_global(&mut self, globalidx: u32, globalref: &GlobalRef) {
+    pub(crate) fn push_init_memory(&mut self, memref: MemoryRef) {
+        Tracer::push_init_memory_intable(&mut self.imtable, memref);
+    }
+
+    pub(crate) fn push_next_memory(&mut self, memref: MemoryRef) {
+        // should do a test to check whethere the final execution table is correct
+        Tracer::push_init_memory_intable(&mut self.next_imtable, memref);
+    }
+
+    fn push_global_intable(table: &mut IMTable, globalidx: u32, globalref: &GlobalRef) {
         let vtype = globalref.elements_value_type().into();
 
-        self.imtable.push(
+        table.push(
             true,
             globalref.is_mutable(),
             globalidx,
@@ -149,6 +326,14 @@ impl Tracer {
             vtype,
             from_value_internal_to_u64_with_typ(vtype, ValueInternal::from(globalref.get())),
         );
+    }
+
+    pub(crate) fn push_global(&mut self, globalidx: u32, globalref: &GlobalRef) {
+        Tracer::push_global_intable(&mut self.imtable, globalidx, globalref);
+    }
+
+    pub(crate) fn push_next_global(&mut self, globalidx: u32, globalref: &GlobalRef) {
+        Tracer::push_global_intable(&mut self.next_imtable, globalidx, globalref);
     }
 
     pub(crate) fn push_elem(&mut self, table_idx: u32, offset: u32, func_idx: u32, type_idx: u32) {

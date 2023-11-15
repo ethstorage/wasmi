@@ -29,7 +29,7 @@ use crate::{
     ValueType,
 };
 use alloc::{boxed::Box, vec::Vec};
-use core::{cell::RefCell, fmt, ops, u32, usize};
+use core::{cell::{RefCell, RefMut}, fmt, ops, u32, usize};
 use parity_wasm::elements::Local;
 use specs::{
     external_host_call_table::ExternalHostCallSignature,
@@ -329,6 +329,9 @@ impl Interpreter {
                     if self.call_stack.is_empty() {
                         // This was the last frame in the call stack. This means we
                         // are done executing.
+                        if let Some(tracer) = self.get_tracer_if_active() {
+                            self.invoke_callback(tracer.borrow_mut(), &mut function_context, true);
+                        };
                         return Ok(());
                     }
                 }
@@ -834,7 +837,7 @@ impl Interpreter {
             }),
 
             _ => {
-                println!("{:?}", *instructions);
+                println!("instructions:{:?}", *instructions);
                 unimplemented!()
             }
         }
@@ -1986,6 +1989,24 @@ impl Interpreter {
         }
     }
 
+    fn invoke_callback(
+        &mut self,
+        mut tracer: RefMut<'_, Tracer>,
+        function_context: &mut FunctionContext,
+        is_last_slice: bool
+    ) {
+        // for creating next_imtable
+        for (globalidx, globalref) in function_context.module().globals().iter().enumerate() {
+            tracer.push_next_global(globalidx as u32, globalref);
+        }
+
+        for memref in function_context.module().clone_memories() {
+            tracer.push_next_memory(memref);
+        }
+        // callback writing witness
+        tracer.invoke_callback(is_last_slice);
+    }
+
     fn do_run_function(
         &mut self,
         function_context: &mut FunctionContext,
@@ -2039,6 +2060,12 @@ impl Interpreter {
                             last_jump_eid,
                             post_status,
                         );
+
+                        // continuation related
+                        if tracer.eid() - tracer.prev_eid() >= 20000 {
+                            self.invoke_callback(tracer, function_context, false);
+                        }
+
                     }
                 }};
             }

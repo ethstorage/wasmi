@@ -233,6 +233,12 @@ impl ModuleInstance {
         self.globals.borrow()
     }
 
+    /// Access all memories. This is a non-standard API so it's unlikely to be
+    /// portable to other engines.
+    pub fn clone_memories(&self) -> Vec<MemoryRef> {
+        self.memories.borrow().clone()
+    }
+
     fn insert_export<N: Into<String>>(&self, name: N, extern_val: ExternVal) {
         self.exports.borrow_mut().insert(name.into(), extern_val);
     }
