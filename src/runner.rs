@@ -304,6 +304,10 @@ impl Interpreter {
         &mut self,
         externals: &'a mut E,
     ) -> Result<(), Trap> {
+        if let Some(tracer) = self.get_tracer_if_active() {
+            tracer.borrow_mut().update_init_memory_map();
+        };
+
         loop {
             let mut function_context = self.call_stack.pop().expect(
                 "on loop entry - not empty; on loop continue - checking for emptiness; qed",
@@ -330,6 +334,7 @@ impl Interpreter {
                         // This was the last frame in the call stack. This means we
                         // are done executing.
                         if let Some(tracer) = self.get_tracer_if_active() {
+                            println!("total instructions: {}", tracer.borrow().eid());
                             self.invoke_callback(tracer.borrow_mut(), &mut function_context, true);
                         };
                         return Ok(());
@@ -1995,14 +2000,14 @@ impl Interpreter {
         function_context: &mut FunctionContext,
         is_last_slice: bool
     ) {
-        // for creating next_imtable
-        for (globalidx, globalref) in function_context.module().globals().iter().enumerate() {
-            tracer.push_next_global(globalidx as u32, globalref);
-        }
+        // for creating next_imtable, deprecated to sync with cont_dev
+        // for (globalidx, globalref) in function_context.module().globals().iter().enumerate() {
+        //     tracer.push_next_global(globalidx as u32, globalref);
+        // }
 
-        for memref in function_context.module().clone_memories() {
-            tracer.push_next_memory(memref);
-        }
+        // for memref in function_context.module().clone_memories() {
+        //     tracer.push_next_memory(memref);
+        // }
         // callback writing witness
         tracer.invoke_callback(is_last_slice);
     }
@@ -2062,10 +2067,9 @@ impl Interpreter {
                         );
 
                         // continuation related
-                        if tracer.eid() - tracer.prev_eid() >= 20000 {
+                        if tracer.eid() - tracer.prev_eid() >= 2000 {
                             self.invoke_callback(tracer, function_context, false);
                         }
-
                     }
                 }};
             }
