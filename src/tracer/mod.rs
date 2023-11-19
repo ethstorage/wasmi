@@ -18,7 +18,7 @@ use crate::{
     MemoryRef,
     Module,
     ModuleRef,
-    Signature,
+    Signature, func::FuncInstanceInternal,
 };
 
 use self::{etable::ETable, imtable::IMTable, phantom::PhantomFunction};
@@ -54,6 +54,9 @@ pub struct Tracer {
     // Wasm Image Function Idx
     pub wasm_input_func_idx: Option<u32>,
     pub wasm_input_func_ref: Option<FuncRef>,
+    pub itable_entries: HashMap<u64, InstructionTableEntry>,
+    pub function_map: HashMap<usize, u32>,
+    pub host_function_map: HashMap<usize, u32>,
 }
 
 impl Tracer {
@@ -80,6 +83,9 @@ impl Tracer {
             phantom_functions_ref: vec![],
             wasm_input_func_ref: None,
             wasm_input_func_idx: None,
+            itable_entries: HashMap::new(),
+            function_map: HashMap::new(),
+            host_function_map: HashMap::new(),
         }
     }
 
@@ -255,6 +261,16 @@ impl Tracer {
 
                     self.function_lookup
                         .push((func.clone(), func_index_in_itable));
+
+                    match *func.as_internal() {
+                        FuncInstanceInternal::Internal { image_func_index, .. } => {
+                            self.function_map.insert(image_func_index, func_index_in_itable);
+                        },
+                        FuncInstanceInternal::Host { host_func_index, .. } => {
+                            self.host_function_map.insert(host_func_index, func_index_in_itable);
+                        },
+                    }
+
                     self.function_index_translation.insert(
                         func_index,
                         FuncDesc {
@@ -312,6 +328,7 @@ impl Tracer {
                                         pc,
                                         instruction.into(&self.function_index_translation),
                                     );
+                                    self.itable_entries.insert((funcdesc.index_within_jtable as u64) << 32 + pc, self.itable.entries().last().unwrap().clone());
                                 } else {
                                     break;
                                 }
@@ -328,24 +345,23 @@ impl Tracer {
     }
 
     pub fn lookup_function(&self, function: &FuncRef) -> u32 {
-        let pos = self
-            .function_lookup
-            .iter()
-            .position(|m| m.0 == *function)
-            .unwrap();
-        self.function_lookup.get(pos).unwrap().1
+        match *function.as_internal() {
+            FuncInstanceInternal::Internal { image_func_index, .. } => {
+                *self.function_map.get(&image_func_index).unwrap()
+            },
+            FuncInstanceInternal::Host { host_func_index, .. } => {
+                *self.host_function_map.get(&host_func_index).unwrap()
+            },
+        }
     }
 
     pub fn lookup_ientry(&self, function: &FuncRef, pos: u32) -> InstructionTableEntry {
         let function_idx = self.lookup_function(function);
 
-        for ientry in self.itable.entries() {
-            if ientry.fid == function_idx && ientry.iid as u32 == pos {
-                return ientry.clone();
-            }
-        }
+        let key = (function_idx as u64) << 32 + pos;
+        return self.itable_entries.get(&key).unwrap().clone();
 
-        unreachable!()
+        // unreachable!()
     }
 
     pub fn lookup_first_inst(&self, function: &FuncRef) -> InstructionTableEntry {
