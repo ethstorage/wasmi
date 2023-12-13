@@ -1,14 +1,20 @@
-use std::collections::HashMap;
+use core::fmt::Debug;
+use std::{collections::HashMap, sync::Arc};
 
 use specs::{
     brtable::{ElemEntry, ElemTable},
     configure_table::ConfigureTable,
     etable::EventTable,
     host_function::HostFunctionDesc,
+    imtable::InitMemoryTable,
     itable::{InstructionTable, InstructionTableEntry},
     jtable::{JumpTable, StaticFrameEntry},
     mtable::VarType,
+    state::{InitializationState, UpdateCompilationTable},
     types::FunctionType,
+    CompilationTable,
+    ExecutionTable,
+    Tables,
 };
 
 use crate::{
@@ -19,9 +25,10 @@ use crate::{
     Module,
     ModuleRef,
     Signature,
+    DEFAULT_VALUE_STACK_LIMIT,
 };
 
-use self::{etable::ETable, imtable::IMTable, phantom::PhantomFunction};
+use self::{imtable::IMTable, phantom::PhantomFunction, etable::ETable};
 
 pub mod etable;
 pub mod imtable;
@@ -32,6 +39,14 @@ pub struct FuncDesc {
     pub index_within_jtable: u32,
     pub ftype: FunctionType,
     pub signature: Signature,
+}
+
+struct Callback(Option<Box<dyn FnMut(Tables, usize)>>);
+
+impl Debug for Callback {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -54,6 +69,12 @@ pub struct Tracer {
     // Wasm Image Function Idx
     pub wasm_input_func_idx: Option<u32>,
     pub wasm_input_func_ref: Option<FuncRef>,
+    capability: usize,
+    callback: Callback,
+    fid_of_entry: u32,
+    prev_eid: u32,
+    cur_imtable: InitMemoryTable,
+    cur_state: InitializationState<u32>,
 }
 
 impl Tracer {
@@ -61,6 +82,8 @@ impl Tracer {
     pub fn new(
         host_plugin_lookup: HashMap<usize, HostFunctionDesc>,
         phantom_functions: &Vec<String>,
+        callback: Option<impl FnMut(Tables, usize) + 'static>,
+        capability: usize,
     ) -> Self {
         Tracer {
             itable: InstructionTable::default(),
@@ -80,6 +103,16 @@ impl Tracer {
             phantom_functions_ref: vec![],
             wasm_input_func_ref: None,
             wasm_input_func_idx: None,
+            capability,
+            callback: match callback {
+                Some(cb) => Callback(Some(Box::new(cb))),
+                _ => Callback(None),
+            },
+            // #[cfg(feature="continuation")]
+            fid_of_entry: 0, // change when initializing module
+            prev_eid: 0,
+            cur_imtable: InitMemoryTable::default(),
+            cur_state: InitializationState::default(), // change when setting fid_of_entry
         }
     }
 
@@ -114,6 +147,104 @@ impl Tracer {
 }
 
 impl Tracer {
+    pub(crate) fn invoke_callback(&mut self, is_last_slice: bool) {
+        // keep etable eid
+        self.prev_eid = self.eid() - 1;
+        let mut etable = std::mem::take(&mut self.etable);
+        let etable_entires = etable.entries_mut();
+        // If it is not the last slice, push a step to keep eid correct.
+        if !is_last_slice {
+            let last_entry = etable_entires.last().unwrap().clone();
+            self.etable = EventTable::new(vec![last_entry])
+        }
+
+        let compilation_tables = CompilationTable {
+            itable: Arc::new(self.itable.clone()),
+            imtable: self.cur_imtable.clone(),
+            elem_table: Arc::new(self.elem_table.clone()),
+            configure_table: Arc::new(self.configure_table),
+            static_jtable: Arc::new(self.static_jtable_entries.clone()),
+            initialization_state: self.cur_state.clone(),
+        };
+
+        // update current state
+        self.cur_state =
+            compilation_tables.update_initialization_state(etable_entires, is_last_slice);
+
+        // update current memory table
+        // If it is not the last slice, push a helper step to get the post initialization state.
+        if !is_last_slice {
+            etable_entires.pop();
+        }
+        self.cur_imtable = compilation_tables.update_init_memory_table(etable_entires);
+
+        let post_image_table = CompilationTable {
+            itable: Arc::new(self.itable.clone()),
+            imtable: self.cur_imtable.clone(),
+            elem_table: Arc::new(self.elem_table.clone()),
+            configure_table: Arc::new(self.configure_table),
+            static_jtable: Arc::new(self.static_jtable_entries.clone()),
+            initialization_state: self.cur_state.clone(),
+        };
+
+        let execution_tables = ExecutionTable {
+            etable,
+            jtable: Arc::new(self.jtable.clone()),
+        };
+
+        if let Some(callback) = self.callback.0.as_mut() {
+            callback(
+                Tables {
+                    compilation_tables,
+                    execution_tables,
+                    post_image_table,
+                    is_last_slice,
+                },
+                self.capability,
+            )
+        }
+    }
+
+    pub(crate) fn get_prev_eid(&self) -> u32 {
+        self.prev_eid
+    }
+
+    pub(crate) fn slice_capability(&self) -> u32 {
+        self.capability as u32
+    }
+
+    pub fn has_dumped(&self) -> bool {
+        self.callback.0.is_some()
+    }
+
+    pub(crate) fn set_fid_of_entry(&mut self, fid_of_entry: u32) {
+        self.fid_of_entry = fid_of_entry;
+        let cur_state = InitializationState {
+            eid: 1,
+            fid: fid_of_entry,
+            iid: 0,
+            frame_id: 0,
+            sp: DEFAULT_VALUE_STACK_LIMIT as u32 - 1,
+
+            host_public_inputs: 1,
+            context_in_index: 1,
+            context_out_index: 1,
+            external_host_call_call_index: 1,
+
+            initial_memory_pages: self.configure_table.init_memory_pages,
+            maximal_memory_pages: self.configure_table.maximal_memory_pages,
+
+            jops: 0,
+        };
+        self.cur_state = cur_state;
+    }
+
+    pub fn get_fid_of_entry(&self) -> u32 {
+        self.fid_of_entry
+    }
+}
+
+impl Tracer {
     pub(crate) fn push_init_memory(&mut self, memref: MemoryRef) {
         // one page contains 64KB*1024/8=8192 u64 entries
         const ENTRIES: u32 = 8192;
@@ -130,6 +261,9 @@ impl Tracer {
                     .push(false, true, i, VarType::I64, u64::from_le_bytes(buf));
             }
         }
+
+        // update current memory table
+        self.cur_imtable = self.imtable.finalized();
     }
 
     pub(crate) fn push_global(&mut self, globalidx: u32, globalref: &GlobalRef) {
