@@ -16,6 +16,7 @@ use specs::{
     ExecutionTable,
     Tables,
 };
+use validation::LINEAR_MEMORY_MAX_PAGES;
 
 use crate::{
     runner::{from_value_internal_to_u64_with_typ, ValueInternal},
@@ -219,7 +220,8 @@ impl Tracer {
 
     pub(crate) fn set_fid_of_entry(&mut self, fid_of_entry: u32) {
         self.fid_of_entry = fid_of_entry;
-        let cur_state = InitializationState {
+
+        self.cur_state = InitializationState {
             eid: 1,
             fid: fid_of_entry,
             iid: 0,
@@ -233,10 +235,9 @@ impl Tracer {
 
             initial_memory_pages: self.configure_table.init_memory_pages,
             maximal_memory_pages: self.configure_table.maximal_memory_pages,
-
+            #[cfg(feature = "continuation")]
             jops: 0,
         };
-        self.cur_state = cur_state;
     }
 
     pub fn get_fid_of_entry(&self) -> u32 {
@@ -246,7 +247,7 @@ impl Tracer {
 
 impl Tracer {
     pub(crate) fn push_init_memory(&mut self, memref: MemoryRef) {
-        // one page contains 64KB*1024/8=8192 u64 entries
+        // one page contains 64KB/8 = 64*1024/8=8192 u64 entries
         const ENTRIES: u32 = 8192;
 
         let pages = (*memref).limits().initial();
@@ -262,8 +263,8 @@ impl Tracer {
             ..memref
                 .limits()
                 .maximum()
-                .map(|limit| limit * ENTRIES)
-                .unwrap_or(u32::MAX)
+                .map(|limit| limit.min(LINEAR_MEMORY_MAX_PAGES) * ENTRIES)
+                .unwrap_or(LINEAR_MEMORY_MAX_PAGES * ENTRIES)
         {
             self.imtable.push(false, true, offset, VarType::I64, 0);
         }
