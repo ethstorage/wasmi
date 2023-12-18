@@ -49,6 +49,19 @@ impl Debug for Callback {
     }
 }
 
+
+pub trait SliceDumper {
+    fn dump(&mut self, tables: Tables);
+    fn get_capacity(&self) -> usize;
+    fn dump_enabled(&self) -> bool;
+}
+
+impl Debug for Box<dyn SliceDumper> {
+    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct Tracer {
     pub itable: InstructionTable,
@@ -75,8 +88,7 @@ pub struct Tracer {
     function_map: HashMap<usize, u32>,
     host_function_map: HashMap<usize, u32>,
     // continuation
-    capability: usize,
-    callback: Callback,
+    witness_dumper: Box<dyn SliceDumper>,
     fid_of_entry: u32,
     prev_eid: u32,
     cur_imtable: InitMemoryTable,
@@ -88,8 +100,7 @@ impl Tracer {
     pub fn new(
         host_plugin_lookup: HashMap<usize, HostFunctionDesc>,
         phantom_functions: &Vec<String>,
-        callback: Option<impl FnMut(Tables, usize) + 'static>,
-        capability: usize,
+        witness_dumper: Box<dyn SliceDumper>
     ) -> Self {
         Tracer {
             itable: InstructionTable::default(),
@@ -113,11 +124,7 @@ impl Tracer {
             itable_entries: HashMap::new(),
             function_map: HashMap::new(),
             host_function_map: HashMap::new(),
-            capability,
-            callback: match callback {
-                Some(cb) => Callback(Some(Box::new(cb))),
-                _ => Callback(None),
-            },
+            witness_dumper,
             // #[cfg(feature="continuation")]
             fid_of_entry: 0, // change when initializing module
             prev_eid: 0,
@@ -157,7 +164,7 @@ impl Tracer {
 }
 
 impl Tracer {
-    pub(crate) fn invoke_callback(&mut self, is_last_slice: bool) {
+    pub(crate) fn dump_witness(&mut self, is_last_slice: bool) {
         // keep etable eid
         self.prev_eid = self.eid() - 1;
         let mut etable = std::mem::take(&mut self.etable);
@@ -217,17 +224,12 @@ impl Tracer {
             jtable: Arc::new(self.jtable.clone()),
         };
 
-        if let Some(callback) = self.callback.0.as_mut() {
-            callback(
-                Tables {
-                    compilation_tables,
-                    execution_tables,
-                    post_image_table,
-                    is_last_slice,
-                },
-                self.capability,
-            )
-        }
+        self.witness_dumper.dump(Tables {
+            compilation_tables,
+            execution_tables,
+            post_image_table,
+            is_last_slice,
+        });
     }
 
     pub(crate) fn get_prev_eid(&self) -> u32 {
@@ -235,11 +237,11 @@ impl Tracer {
     }
 
     pub(crate) fn slice_capability(&self) -> u32 {
-        self.capability as u32
+        self.witness_dumper.get_capacity() as u32
     }
 
-    pub fn has_dumped(&self) -> bool {
-        self.callback.0.is_some()
+    pub fn dump_enabled(&self) -> bool {
+        self.witness_dumper.dump_enabled()
     }
 
     pub(crate) fn set_fid_of_entry(&mut self, fid_of_entry: u32) {
