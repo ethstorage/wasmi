@@ -2041,13 +2041,13 @@ impl Interpreter {
                         );
 
                         // invoke callback to dump continuation slice tables
-                        if tracer.has_dumped() {
+                        if tracer.dump_enabled() {
                             // println!("capacity: {}, tracer eid: {}, {}", tracer.slice_capability(), tracer.eid(), tracer.get_prev_eid());
                             let is_last_slice = self.call_stack.is_empty() && $is_return;
                             // println!("is last slice: {}", is_last_slice);
                             assert!(tracer.eid() > tracer.get_prev_eid(), "eid: {}, prev_edi: {}", tracer.eid(), tracer.get_prev_eid());
                             if (tracer.eid() - tracer.get_prev_eid() > tracer.slice_capability()) || is_last_slice {
-                                tracer.invoke_callback(is_last_slice);
+                                tracer.dump_witness(is_last_slice);
                             }
                         }
                     }
