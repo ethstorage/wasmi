@@ -2,13 +2,13 @@ use core::fmt::Debug;
 use std::{collections::HashMap, sync::Arc};
 
 use specs::{
-    brtable::{ElemEntry, ElemTable},
+    brtable::{ElemEntry, ElemTable, BrTable},
     configure_table::ConfigureTable,
     etable::EventTable,
     host_function::HostFunctionDesc,
     imtable::InitMemoryTable,
     itable::{InstructionTable, InstructionTableEntry},
-    jtable::{JumpTable, StaticFrameEntry},
+    jtable::{JumpTable, StaticFrameEntry, STATIC_FRAME_ENTRY_NUMBER},
     mtable::VarType,
     state::{InitializationState, UpdateCompilationTable},
     types::FunctionType,
@@ -53,6 +53,7 @@ impl Debug for Callback {
 pub struct Tracer {
     pub itable: InstructionTable,
     pub imtable: IMTable,
+    pub br_table: BrTable,
     pub etable: EventTable,
     pub jtable: JumpTable,
     pub elem_table: ElemTable,
@@ -88,6 +89,7 @@ impl Tracer {
         Tracer {
             itable: InstructionTable::default(),
             imtable: IMTable::default(),
+            br_table: BrTable::default(),
             etable: EventTable::default(),
             last_jump_eid: vec![],
             jtable: JumpTable::default(),
@@ -158,12 +160,26 @@ impl Tracer {
             self.etable = EventTable::new(vec![last_entry])
         }
 
+        let static_jtable = Arc::new(
+                self
+                .static_jtable_entries
+                .clone()
+                .try_into()
+                .expect(&format!(
+                    "The number of static frame entries should be {}",
+                    STATIC_FRAME_ENTRY_NUMBER
+                )),
+        );
+
+        let br_table = Arc::new(self.br_table.clone());
+
         let compilation_tables = CompilationTable {
             itable: Arc::new(self.itable.clone()),
             imtable: self.cur_imtable.clone(),
+            br_table: br_table.clone(),
             elem_table: Arc::new(self.elem_table.clone()),
             configure_table: Arc::new(self.configure_table),
-            static_jtable: Arc::new(self.static_jtable_entries.clone()),
+            static_jtable: Arc::clone(&static_jtable),
             initialization_state: self.cur_state.clone(),
         };
 
@@ -181,9 +197,10 @@ impl Tracer {
         let post_image_table = CompilationTable {
             itable: Arc::new(self.itable.clone()),
             imtable: self.cur_imtable.clone(),
+            br_table,
             elem_table: Arc::new(self.elem_table.clone()),
             configure_table: Arc::new(self.configure_table),
-            static_jtable: Arc::new(self.static_jtable_entries.clone()),
+            static_jtable: static_jtable,
             initialization_state: self.cur_state.clone(),
         };
 
@@ -219,7 +236,8 @@ impl Tracer {
 
     pub(crate) fn set_fid_of_entry(&mut self, fid_of_entry: u32) {
         self.fid_of_entry = fid_of_entry;
-        let cur_state = InitializationState {
+
+        self.cur_state = InitializationState {
             eid: 1,
             fid: fid_of_entry,
             iid: 0,
@@ -233,10 +251,9 @@ impl Tracer {
 
             initial_memory_pages: self.configure_table.init_memory_pages,
             maximal_memory_pages: self.configure_table.maximal_memory_pages,
-
+            // #[cfg(feature = "continuation")]
             jops: 0,
         };
-        self.cur_state = cur_state;
     }
 
     pub fn get_fid_of_entry(&self) -> u32 {
@@ -246,7 +263,7 @@ impl Tracer {
 
 impl Tracer {
     pub(crate) fn push_init_memory(&mut self, memref: MemoryRef) {
-        // one page contains 64KB*1024/8=8192 u64 entries
+        // one page contains 64KB/8 = 64*1024/8=8192 u64 entries
         const ENTRIES: u32 = 8192;
 
         let pages = (*memref).limits().initial();
@@ -264,6 +281,7 @@ impl Tracer {
 
         // update current memory table
         self.cur_imtable = self.imtable.finalized();
+        self.br_table = self.itable.create_brtable();
     }
 
     pub(crate) fn push_global(&mut self, globalidx: u32, globalref: &GlobalRef) {

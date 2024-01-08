@@ -235,12 +235,6 @@ impl ModuleInstance {
         self.globals.borrow()
     }
 
-    /// Access all memories. This is a non-standard API so it's unlikely to be
-    /// portable to other engines.
-    pub(crate) fn clone_memories(&self) -> Vec<MemoryRef> {
-        self.memories.borrow().clone()
-    }
-
     fn insert_export<N: Into<String>>(&self, name: N, extern_val: ExternVal) {
         self.exports.borrow_mut().insert(name.into(), extern_val);
     }
@@ -615,7 +609,6 @@ impl ModuleInstance {
         tracer: Option<Rc<RefCell<Tracer>>>,
     ) -> Result<NotStartedModuleRef<'m>, Error> {
         let module = loaded_module.module();
-
         let mut extern_vals = Vec::new();
         for import_entry in module.import_section().map(|s| s.entries()).unwrap_or(&[]) {
             let module_name = import_entry.module();
@@ -655,7 +648,6 @@ impl ModuleInstance {
         let module_ref = Self::with_externvals(loaded_module, extern_vals.iter(), tracer.clone());
 
         let instance = module_ref.as_ref().expect("failed to instantiate wasm module");
-
         // set tracer's initial fid_of_entry
         let tracer = tracer.expect("failed to initialize tracer");
         let fid_of_entry = {
