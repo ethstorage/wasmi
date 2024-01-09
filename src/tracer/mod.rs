@@ -261,7 +261,7 @@ impl Tracer {
 
             initial_memory_pages: self.configure_table.init_memory_pages,
             maximal_memory_pages: self.configure_table.maximal_memory_pages,
-            // #[cfg(feature = "continuation")]
+            #[cfg(feature = "continuation")]
             jops: 0,
         };
     }
