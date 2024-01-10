@@ -1,5 +1,5 @@
-use core::fmt::Debug;
-use std::{collections::HashMap, sync::Arc};
+use core::{cell::RefCell, fmt::Debug};
+use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 use specs::{
     brtable::{ElemEntry, ElemTable, BrTable},
@@ -18,6 +18,7 @@ use specs::{
 };
 
 use crate::{
+    func::FuncInstanceInternal,
     runner::{from_value_internal_to_u64_with_typ, ValueInternal},
     FuncRef,
     GlobalRef,
@@ -25,10 +26,10 @@ use crate::{
     Module,
     ModuleRef,
     Signature,
-    DEFAULT_VALUE_STACK_LIMIT, func::FuncInstanceInternal,
+    DEFAULT_VALUE_STACK_LIMIT,
 };
 
-use self::{imtable::IMTable, phantom::PhantomFunction, etable::ETable};
+use self::{etable::ETable, imtable::IMTable, phantom::PhantomFunction};
 
 pub mod etable;
 pub mod imtable;
@@ -41,22 +42,13 @@ pub struct FuncDesc {
     pub signature: Signature,
 }
 
-struct Callback(Option<Box<dyn FnMut(Tables, usize)>>);
-
-impl Debug for Callback {
-    fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        Ok(())
-    }
-}
-
-
 pub trait SliceDumper {
     fn dump(&mut self, tables: Tables);
     fn get_capacity(&self) -> usize;
     fn dump_enabled(&self) -> bool;
 }
 
-impl Debug for Box<dyn SliceDumper> {
+impl Debug for dyn SliceDumper {
     fn fmt(&self, _: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         Ok(())
     }
@@ -88,7 +80,7 @@ pub struct Tracer {
     function_map: HashMap<usize, u32>,
     host_function_map: HashMap<usize, u32>,
     // continuation
-    witness_dumper: Box<dyn SliceDumper>,
+    witness_dumper: Rc<RefCell<dyn SliceDumper>>,
     fid_of_entry: u32,
     prev_eid: u32,
     cur_imtable: InitMemoryTable,
@@ -100,7 +92,7 @@ impl Tracer {
     pub fn new(
         host_plugin_lookup: HashMap<usize, HostFunctionDesc>,
         phantom_functions: &Vec<String>,
-        witness_dumper: Box<dyn SliceDumper>
+        witness_dumper: Rc<RefCell<dyn SliceDumper>>,
     ) -> Self {
         Tracer {
             itable: InstructionTable::default(),
@@ -224,7 +216,7 @@ impl Tracer {
             jtable: Arc::new(self.jtable.clone()),
         };
 
-        self.witness_dumper.dump(Tables {
+        self.witness_dumper.borrow_mut().dump(Tables {
             compilation_tables,
             execution_tables,
             post_image_table,
@@ -237,11 +229,11 @@ impl Tracer {
     }
 
     pub(crate) fn slice_capability(&self) -> u32 {
-        self.witness_dumper.get_capacity() as u32
+        self.witness_dumper.borrow().get_capacity() as u32
     }
 
     pub fn dump_enabled(&self) -> bool {
-        self.witness_dumper.dump_enabled()
+        self.witness_dumper.borrow().dump_enabled()
     }
 
     pub(crate) fn set_fid_of_entry(&mut self, fid_of_entry: u32) {
@@ -412,12 +404,18 @@ impl Tracer {
                         .push((func.clone(), func_index_in_itable));
 
                     match *func.as_internal() {
-                        FuncInstanceInternal::Internal { image_func_index, .. } => {
-                            self.function_map.insert(image_func_index, func_index_in_itable);
-                        },
-                        FuncInstanceInternal::Host { host_func_index, .. } => {
-                            self.host_function_map.insert(host_func_index, func_index_in_itable);
-                        },
+                        FuncInstanceInternal::Internal {
+                            image_func_index, ..
+                        } => {
+                            self.function_map
+                                .insert(image_func_index, func_index_in_itable);
+                        }
+                        FuncInstanceInternal::Host {
+                            host_func_index, ..
+                        } => {
+                            self.host_function_map
+                                .insert(host_func_index, func_index_in_itable);
+                        }
                     }
 
                     self.function_index_translation.insert(

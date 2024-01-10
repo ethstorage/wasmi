@@ -138,7 +138,7 @@ impl ETable for EventTable {
     fn get_latest_eid(&self) -> u32 {
         match self.entries().last() {
             Some(e) => e.eid,
-            None => 0
+            None => 0,
         }
     }
 
@@ -170,6 +170,5 @@ impl ETable for EventTable {
         };
 
         self.entries_mut().push(eentry);
-
     }
 }

@@ -647,7 +647,9 @@ impl ModuleInstance {
 
         let module_ref = Self::with_externvals(loaded_module, extern_vals.iter(), tracer.clone());
 
-        let instance = module_ref.as_ref().expect("failed to instantiate wasm module");
+        let instance = module_ref
+            .as_ref()
+            .expect("failed to instantiate wasm module");
         // set tracer's initial fid_of_entry
         let tracer = tracer.expect("failed to initialize tracer");
         let fid_of_entry = {
@@ -695,10 +697,7 @@ impl ModuleInstance {
                 idx_of_entry
             }
         };
-        tracer
-            .clone()
-            .borrow_mut()
-            .set_fid_of_entry(fid_of_entry);
+        tracer.clone().borrow_mut().set_fid_of_entry(fid_of_entry);
 
         module_ref
     }
